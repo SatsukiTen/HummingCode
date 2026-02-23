@@ -7,7 +7,10 @@ enum class ChordType(val displayName: String, val intervals: List<Int>) {
     MINOR7("m7", listOf(0, 3, 7, 10)),
     DOMINANT7("7", listOf(0, 4, 7, 10)),
     SUS4("sus4", listOf(0, 5, 7)),
-    ADD9("add9", listOf(0, 4, 7, 14))
+    ADD9("add9", listOf(0, 4, 7, 14)),
+    DIM("dim", listOf(0, 3, 6)),
+    AUG("aug", listOf(0, 4, 8)),
+    SUS2("sus2", listOf(0, 2, 7))
 }
 
 data class Chord(
@@ -38,8 +41,10 @@ data class Chord(
 data class NoteSegment(
     val noteName: String,
     val durationMs: Long,
+    val beatCount: Int,
     val suggestedChords: List<Chord>,
-    val selectedChordIndex: Int = 0
+    val selectedChordIndex: Int = 0,
+    val octaveShift: Int = 0
 )
 
 data class DetectedNote(
@@ -53,6 +58,7 @@ sealed class AppScreen {
     object Home : AppScreen()
     object Recording : AppScreen()
     object ChordSelection : AppScreen()
+    object SavedList : AppScreen()
 }
 
 data class TimeSignature(val numerator: Int, val denominator: Int) {
@@ -69,6 +75,8 @@ data class TimeSignature(val numerator: Int, val denominator: Int) {
 data class UiState(
     val screen: AppScreen = AppScreen.Home,
     val isRecording: Boolean = false,
+    val isCountingDown: Boolean = false,
+    val countdownBeatsRemaining: Int = 0,
     val currentDetectedNote: String? = null,
     val segments: List<NoteSegment> = emptyList(),
     val isPlaying: Boolean = false,
@@ -76,5 +84,6 @@ data class UiState(
     val errorMessage: String? = null,
     val bpm: Int = 120,
     val timeSignature: TimeSignature = TimeSignature(4, 4),
-    val currentBeat: Int = -1
+    val currentBeat: Int = -1,
+    val savedProgressions: List<SavedProgression> = emptyList()
 )

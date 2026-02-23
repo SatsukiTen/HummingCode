@@ -73,6 +73,15 @@ class MainActivity : ComponentActivity() {
                     onSelectChord = { segmentIndex, chordIndex ->
                         viewModel.selectChord(segmentIndex, chordIndex)
                     },
+                    onBeatCountChange = { segmentIndex, beatCount ->
+                        viewModel.updateBeatCount(segmentIndex, beatCount)
+                    },
+                    onOctaveChange = { segmentIndex, delta ->
+                        viewModel.adjustSegmentOctave(segmentIndex, delta)
+                    },
+                    onNoteShift = { segmentIndex, semitones ->
+                        viewModel.shiftSegmentNote(segmentIndex, semitones)
+                    },
                     onPlayProgression = {
                         // Playing画面に遷移
                         viewModel.playProgression()
@@ -81,7 +90,11 @@ class MainActivity : ComponentActivity() {
                     onGoHome = { viewModel.goHome() },
                     onBpmChange = { viewModel.setBpm(it) },
                     onTimeSignatureChange = { viewModel.setTimeSignature(it) },
-                    onTapTempo = { viewModel.tapTempo() }
+                    onTapTempo = { viewModel.tapTempo() },
+                    onGoToSavedList = { viewModel.goToSavedList() },
+                    onSaveProgression = { title -> viewModel.saveProgression(title) },
+                    onDeleteProgression = { id -> viewModel.deleteProgression(id) },
+                    onLoadProgression = { prog -> viewModel.loadProgression(prog) }
                 )
             }
         }

@@ -36,13 +36,17 @@ class ChordPlayer {
      */
     suspend fun playProgression(
         chords: List<Chord>,
+        durationsMs: List<Long>,
+        baseOctaves: List<Int>,
         onChordChange: (Int) -> Unit
     ) = withContext(Dispatchers.IO) {
         stopRequested = false
         for ((index, chord) in chords.withIndex()) {
             if (!isActive || stopRequested) break
             onChordChange(index)
-            playChord(chord, CHORD_DURATION_MS)
+            val duration = durationsMs.getOrElse(index) { CHORD_DURATION_MS }
+            val octave = baseOctaves.getOrElse(index) { 3 }
+            playChord(chord, duration, octave)
         }
         onChordChange(-1)
     }
@@ -50,22 +54,24 @@ class ChordPlayer {
     /**
      * 単一のコードを再生する。
      */
-    suspend fun playChord(chord: Chord, durationMs: Long = CHORD_DURATION_MS) =
-        withContext(Dispatchers.IO) {
-            val midiNotes = chord.getMidiNotes(baseOctave = 3)
-            val samples = synthesizeChord(midiNotes, durationMs)
-            playPcmData(samples)
-        }
+    suspend fun playChord(
+        chord: Chord,
+        durationMs: Long = CHORD_DURATION_MS,
+        baseOctave: Int = 3
+    ) = withContext(Dispatchers.IO) {
+        val midiNotes = chord.getMidiNotes(baseOctave = baseOctave)
+        val samples = synthesizeChord(midiNotes, durationMs)
+        playPcmData(samples)
+    }
 
     /**
      * 単音をプレビュー再生する（コード選択時のフィードバック用）
      * 前の再生中なら停止してから再生する。
      */
-    suspend fun previewChord(chord: Chord) = withContext(Dispatchers.IO) {
-        // 前の再生を停止してから新しい音を鳴らす
+    suspend fun previewChord(chord: Chord, baseOctave: Int = 3) = withContext(Dispatchers.IO) {
         stop()
         stopRequested = false
-        val midiNotes = chord.getMidiNotes(baseOctave = 3)
+        val midiNotes = chord.getMidiNotes(baseOctave = baseOctave)
         val samples = synthesizeChord(midiNotes, 600L)
         playPcmData(samples)
     }

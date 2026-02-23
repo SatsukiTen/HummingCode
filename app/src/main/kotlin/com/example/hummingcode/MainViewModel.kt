@@ -1,15 +1,21 @@
 package com.example.hummingcode
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.hummingcode.audio.AudioRecorder
 import com.example.hummingcode.audio.DetectedPitch
 import com.example.hummingcode.audio.Metronome
 import com.example.hummingcode.chord.ChordPlayer
 import com.example.hummingcode.chord.ChordSuggester
+import com.example.hummingcode.data.ProgressionStorage
 import com.example.hummingcode.model.AppScreen
+import com.example.hummingcode.model.NoteSegment
+import com.example.hummingcode.model.SavedProgression
+import com.example.hummingcode.model.SavedSegment
 import com.example.hummingcode.model.TimeSignature
 import com.example.hummingcode.model.UiState
+import java.util.UUID
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,11 +24,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-class MainViewModel : ViewModel() {
+class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val audioRecorder = AudioRecorder()
     private val chordPlayer = ChordPlayer()
     private val metronome = Metronome()
+    private val storage = ProgressionStorage(application)
+
+    private val noteNames = listOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
@@ -39,6 +48,8 @@ class MainViewModel : ViewModel() {
     private var beatDurationMs = 500L
     // 最後に処理した拍インデックス (-1=拍未発火)
     private var lastBeatIndex = -1
+    // 1拍内で支配的音名として採用するのに必要な最小検出フレーム数
+    private val minBeatDetections = 2
 
     // ホーム画面プレビュー用メトロノーム
     private var previewMetronomeJob: Job? = null
@@ -49,6 +60,10 @@ class MainViewModel : ViewModel() {
 
     init {
         startMetronomePreview()
+        viewModelScope.launch {
+            val progressions = storage.loadAll()
+            _uiState.update { it.copy(savedProgressions = progressions) }
+        }
     }
 
     /** BPM を 40〜240 の範囲でセットし、プレビューメトロノームを再起動する。 */
@@ -114,7 +129,7 @@ class MainViewModel : ViewModel() {
      * 録音を開始する。
      */
     fun startRecording() {
-        if (_uiState.value.isRecording) return
+        if (_uiState.value.isRecording || _uiState.value.isCountingDown) return
 
         stopMetronomePreview()
         currentBeatNotes.clear()
@@ -122,10 +137,16 @@ class MainViewModel : ViewModel() {
         beatDurationMs = 60_000L / _uiState.value.bpm
         lastBeatIndex = -1
 
+        val beatsPerMeasure = _uiState.value.timeSignature.numerator
+        val totalCountdownBeats = 2 * beatsPerMeasure
+        var countdownBeatsLeft = totalCountdownBeats
+
         _uiState.update {
             it.copy(
                 screen = AppScreen.Recording,
-                isRecording = true,
+                isRecording = false,
+                isCountingDown = true,
+                countdownBeatsRemaining = totalCountdownBeats,
                 currentDetectedNote = null,
                 segments = emptyList(),
                 errorMessage = null
@@ -135,33 +156,50 @@ class MainViewModel : ViewModel() {
         metronomeJob = viewModelScope.launch {
             metronome.start(
                 bpm = _uiState.value.bpm,
-                beatsPerMeasure = _uiState.value.timeSignature.numerator
+                beatsPerMeasure = beatsPerMeasure
             ).collect { beatIndex ->
-                // 前の拍のウィンドウを確定
-                if (lastBeatIndex >= 0) {
-                    val dominant = currentBeatNotes
-                        .groupingBy { it }.eachCount()
-                        .maxByOrNull { it.value }?.key
-                    finishedBeats.add(dominant)
-                    currentBeatNotes.clear()
-                }
-                lastBeatIndex = beatIndex
-                _uiState.update { it.copy(currentBeat = beatIndex) }
-            }
-        }
-
-        recordingJob = viewModelScope.launch {
-            audioRecorder.recordAndDetect().collect { pitch ->
-                when (pitch) {
-                    is DetectedPitch.Success -> {
-                        val note = pitch.noteName
-                        _uiState.update { it.copy(currentDetectedNote = note) }
-                        // 拍ウィンドウ内の音をすべて蓄積; 拍境界で多数決をとる
-                        if (note != null) currentBeatNotes.add(note)
+                if (countdownBeatsLeft > 0) {
+                    countdownBeatsLeft--
+                    if (countdownBeatsLeft == 0) {
+                        // カウントダウン終了 → 録音開始
+                        _uiState.update {
+                            it.copy(
+                                currentBeat = beatIndex,
+                                countdownBeatsRemaining = 0,
+                                isCountingDown = false,
+                                isRecording = true
+                            )
+                        }
+                        recordingJob = viewModelScope.launch {
+                            audioRecorder.recordAndDetect().collect { pitch ->
+                                when (pitch) {
+                                    is DetectedPitch.Success -> {
+                                        val note = pitch.noteName
+                                        _uiState.update { it.copy(currentDetectedNote = note) }
+                                        if (note != null) currentBeatNotes.add(note)
+                                    }
+                                    is DetectedPitch.Error -> {
+                                        _uiState.update { it.copy(errorMessage = pitch.message) }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        _uiState.update {
+                            it.copy(
+                                currentBeat = beatIndex,
+                                countdownBeatsRemaining = countdownBeatsLeft
+                            )
+                        }
                     }
-                    is DetectedPitch.Error -> {
-                        _uiState.update { it.copy(errorMessage = pitch.message) }
+                } else {
+                    // 録音フェーズのビート処理
+                    if (lastBeatIndex >= 0) {
+                        finishedBeats.add(dominantNote(currentBeatNotes))
+                        currentBeatNotes.clear()
                     }
+                    lastBeatIndex = beatIndex
+                    _uiState.update { it.copy(currentBeat = beatIndex) }
                 }
             }
         }
@@ -178,14 +216,9 @@ class MainViewModel : ViewModel() {
 
         // 最後の（未完了の）拍をフラッシュ
         if (lastBeatIndex >= 0) {
-            val dominant = currentBeatNotes
-                .groupingBy { it }.eachCount()
-                .maxByOrNull { it.value }?.key
-            finishedBeats.add(dominant)
+            finishedBeats.add(dominantNote(currentBeatNotes))
         }
         currentBeatNotes.clear()
-
-        _uiState.update { it.copy(currentBeat = -1) }
 
         val segments = ChordSuggester.buildSegmentsFromBeats(finishedBeats, beatDurationMs)
 
@@ -193,12 +226,76 @@ class MainViewModel : ViewModel() {
         _uiState.update {
             it.copy(
                 isRecording = false,
+                isCountingDown = false,
+                countdownBeatsRemaining = 0,
+                currentBeat = -1,
                 screen = nextScreen,
                 segments = segments,
                 currentDetectedNote = null
             )
         }
         if (nextScreen == AppScreen.Home) startMetronomePreview()
+    }
+
+    /**
+     * 拍内の音名リストから支配的音名を返す。
+     * 最頻の音名が minBeatDetections 回以上出現しない場合は null（無音扱い）。
+     */
+    private fun dominantNote(notes: List<String>): String? {
+        val counts = notes.groupingBy { it }.eachCount()
+        val entry = counts.maxByOrNull { it.value } ?: return null
+        return if (entry.value >= minBeatDetections) entry.key else null
+    }
+
+    /**
+     * セグメントの拍数を更新する。0 を指定するとそのセグメントをスキップ扱いにする。
+     */
+    fun updateBeatCount(segmentIndex: Int, beatCount: Int) {
+        val newCount = beatCount.coerceAtLeast(0)
+        val segments = _uiState.value.segments.toMutableList()
+        if (segmentIndex < segments.size) {
+            val seg = segments[segmentIndex]
+            segments[segmentIndex] = seg.copy(
+                beatCount = newCount,
+                durationMs = beatDurationMs * newCount
+            )
+            _uiState.update { it.copy(segments = segments) }
+        }
+    }
+
+    /**
+     * 特定セグメントのオクターブを1段階上下する (-2〜+2 の範囲でクランプ)。
+     */
+    fun adjustSegmentOctave(segmentIndex: Int, delta: Int) {
+        val segments = _uiState.value.segments.toMutableList()
+        if (segmentIndex < segments.size) {
+            val seg = segments[segmentIndex]
+            segments[segmentIndex] = seg.copy(
+                octaveShift = (seg.octaveShift + delta).coerceIn(-2, 2)
+            )
+            _uiState.update { it.copy(segments = segments) }
+        }
+    }
+
+    /**
+     * セグメントの基準音名を半音単位で上下する。
+     * 音名が変わるとコード候補も自動的に更新される。
+     */
+    fun shiftSegmentNote(segmentIndex: Int, semitones: Int) {
+        val segments = _uiState.value.segments.toMutableList()
+        if (segmentIndex >= segments.size) return
+        val seg = segments[segmentIndex]
+        val currentIdx = noteNames.indexOf(seg.noteName)
+        if (currentIdx < 0) return
+        val newIdx = (currentIdx + semitones + 12) % 12
+        val newNoteName = noteNames[newIdx]
+        val newChords = ChordSuggester.getSuggestionsFor(newNoteName)
+        segments[segmentIndex] = seg.copy(
+            noteName = newNoteName,
+            suggestedChords = newChords,
+            selectedChordIndex = 0
+        )
+        _uiState.update { it.copy(segments = segments) }
     }
 
     /**
@@ -210,33 +307,48 @@ class MainViewModel : ViewModel() {
             segments[segmentIndex] = segments[segmentIndex].copy(selectedChordIndex = chordIndex)
             _uiState.update { it.copy(segments = segments) }
 
-            // 選択したコードをプレビュー再生
+            // 選択したコードをプレビュー再生 (セグメントのオクターブで)
             val chord = segments[segmentIndex].suggestedChords.getOrNull(chordIndex)
             if (chord != null) {
+                val baseOctave = 3 + segments[segmentIndex].octaveShift
                 viewModelScope.launch {
-                    chordPlayer.previewChord(chord)
+                    chordPlayer.previewChord(chord, baseOctave)
                 }
             }
         }
     }
 
     /**
-     * 選択したコード進行を再生する。
+     * 選択したコード進行を再生する。各セグメントの durationMs を使用する。
      */
     fun playProgression() {
         if (_uiState.value.isPlaying) return
 
-        val chords = _uiState.value.segments.mapNotNull { segment ->
-            segment.suggestedChords.getOrNull(segment.selectedChordIndex)
-        }
+        // 元のセグメントインデックスを保持しながらスキップセグメントを除外
+        val playableEntries = _uiState.value.segments
+            .mapIndexedNotNull { index, segment ->
+                if (segment.beatCount == 0) return@mapIndexedNotNull null
+                val chord = segment.suggestedChords.getOrNull(segment.selectedChordIndex)
+                    ?: return@mapIndexedNotNull null
+                Triple(index, chord, segment.durationMs)
+            }
 
-        if (chords.isEmpty()) return
+        if (playableEntries.isEmpty()) return
+
+        val chords = playableEntries.map { it.second }
+        val durations = playableEntries.map { it.third }
+        val originalIndices = playableEntries.map { it.first }
+        val baseOctaves = originalIndices.map { origIdx ->
+            3 + _uiState.value.segments[origIdx].octaveShift
+        }
 
         _uiState.update { it.copy(isPlaying = true, playingChordIndex = -1) }
 
         playbackJob = viewModelScope.launch {
-            chordPlayer.playProgression(chords) { chordIndex ->
-                _uiState.update { it.copy(playingChordIndex = chordIndex) }
+            chordPlayer.playProgression(chords, durations, baseOctaves) { filteredIndex ->
+                // filteredIndex を元のセグメントインデックスに変換 (-1 は再生終了)
+                val segmentIndex = originalIndices.getOrElse(filteredIndex) { -1 }
+                _uiState.update { it.copy(playingChordIndex = segmentIndex) }
             }
             _uiState.update { it.copy(isPlaying = false, playingChordIndex = -1) }
         }
@@ -262,11 +374,17 @@ class MainViewModel : ViewModel() {
         stopPlayback()
         recordingJob?.cancel()
         recordingJob = null
-        // BPM・拍子設定はリセットせず引き継ぐ
+        // BPM・拍子・保存済みリストは引き継ぐ
         val savedBpm = _uiState.value.bpm
         val savedTs = _uiState.value.timeSignature
+        val savedProgressions = _uiState.value.savedProgressions
         _uiState.update {
-            UiState(screen = AppScreen.Home, bpm = savedBpm, timeSignature = savedTs)
+            UiState(
+                screen = AppScreen.Home,
+                bpm = savedBpm,
+                timeSignature = savedTs,
+                savedProgressions = savedProgressions
+            )
         }
         startMetronomePreview()
     }
@@ -277,6 +395,84 @@ class MainViewModel : ViewModel() {
     fun goToChordSelection() {
         stopPlayback()
         _uiState.update { it.copy(screen = AppScreen.ChordSelection) }
+    }
+
+    /** 保存済みリスト画面へ遷移する。 */
+    fun goToSavedList() {
+        stopMetronomePreview()
+        _uiState.update { it.copy(screen = AppScreen.SavedList) }
+    }
+
+    /**
+     * 現在のコード進行にタイトルをつけて保存する。
+     */
+    fun saveProgression(title: String) {
+        val state = _uiState.value
+        val savedSegments = state.segments.map { seg ->
+            val chord = seg.suggestedChords.getOrNull(seg.selectedChordIndex)
+            SavedSegment(
+                noteName = seg.noteName,
+                durationMs = seg.durationMs,
+                beatCount = seg.beatCount,
+                selectedChordIndex = seg.selectedChordIndex,
+                octaveShift = seg.octaveShift,
+                selectedChordDisplay = chord?.displayName ?: seg.noteName
+            )
+        }
+        val progression = SavedProgression(
+            id = UUID.randomUUID().toString(),
+            title = title,
+            savedAt = System.currentTimeMillis(),
+            bpm = state.bpm,
+            timeSignatureNumerator = state.timeSignature.numerator,
+            timeSignatureDenominator = state.timeSignature.denominator,
+            segments = savedSegments
+        )
+        viewModelScope.launch {
+            val updated = _uiState.value.savedProgressions + progression
+            storage.saveAll(updated)
+            _uiState.update { it.copy(savedProgressions = updated) }
+        }
+    }
+
+    /**
+     * 保存済みコード進行を読み込んでコード選択画面へ遷移する。
+     */
+    fun loadProgression(progression: SavedProgression) {
+        val segments = progression.segments.map { saved ->
+            val chords = ChordSuggester.getSuggestionsFor(saved.noteName)
+            NoteSegment(
+                noteName = saved.noteName,
+                durationMs = saved.durationMs,
+                beatCount = saved.beatCount,
+                suggestedChords = chords,
+                selectedChordIndex = saved.selectedChordIndex.coerceIn(0, (chords.size - 1).coerceAtLeast(0)),
+                octaveShift = saved.octaveShift
+            )
+        }
+        val ts = TimeSignature(progression.timeSignatureNumerator, progression.timeSignatureDenominator)
+        _uiState.update {
+            it.copy(
+                screen = AppScreen.ChordSelection,
+                segments = segments,
+                bpm = progression.bpm,
+                timeSignature = ts,
+                isPlaying = false,
+                playingChordIndex = -1,
+                currentBeat = -1
+            )
+        }
+    }
+
+    /**
+     * 保存済みコード進行を削除する。
+     */
+    fun deleteProgression(id: String) {
+        viewModelScope.launch {
+            val updated = _uiState.value.savedProgressions.filter { it.id != id }
+            storage.saveAll(updated)
+            _uiState.update { it.copy(savedProgressions = updated) }
+        }
     }
 
     override fun onCleared() {

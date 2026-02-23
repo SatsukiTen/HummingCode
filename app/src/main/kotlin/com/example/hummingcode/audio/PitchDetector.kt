@@ -10,7 +10,7 @@ import kotlin.math.roundToInt
  */
 class PitchDetector(private val sampleRate: Int = 44100) {
 
-    private val threshold = 0.15f
+    private val threshold = 0.10f
     // 検出する周波数範囲: 80Hz (低いD2) ～ 1000Hz (高いB5)
     private val minFreq = 80f
     private val maxFreq = 1000f
@@ -38,7 +38,7 @@ class PitchDetector(private val sampleRate: Int = 44100) {
 
         // 音量チェック: 無音区間はスキップ
         val rms = calculateRms(samples)
-        if (rms < 0.01f) return -1f
+        if (rms < 0.04f) return -1f
 
         val halfSize = minOf(samples.size / 2, maxTau + 1)
 

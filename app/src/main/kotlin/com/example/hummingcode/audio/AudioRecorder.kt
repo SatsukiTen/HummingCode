@@ -23,6 +23,10 @@ class AudioRecorder {
         const val ANALYSIS_FRAME_SIZE = 4096
         // ステップサイズ: 約50ms (50%オーバーラップ)
         const val STEP_SIZE = 2048
+        // 中央値フィルタのウィンドウ幅 (約320ms)
+        const val MEDIAN_WINDOW = 7
+        // 有効検出とみなすのに必要な最小フレーム数 (ウィンドウの過半数)
+        const val MIN_STABLE_COUNT = 5
     }
 
     private val pitchDetector = PitchDetector(SAMPLE_RATE)
@@ -53,6 +57,8 @@ class AudioRecorder {
             val readBuffer = ShortArray(STEP_SIZE)
             val analysisBuffer = ShortArray(ANALYSIS_FRAME_SIZE)
             var fillIndex = 0
+            // 中央値フィルタ用: 直近 MEDIAN_WINDOW フレームの生周波数 (-1f = 未検出)
+            val freqHistory = ArrayDeque<Float>()
 
             while (coroutineContext.isActive) {
                 val readCount = audioRecord.read(readBuffer, 0, STEP_SIZE)
@@ -72,10 +78,27 @@ class AudioRecorder {
                         orderedBuffer[i] = analysisBuffer[(startIdx + i) % ANALYSIS_FRAME_SIZE]
                     }
 
-                    val frequency = pitchDetector.detectPitch(orderedBuffer)
-                    val noteName = if (frequency > 0) NoteMapper.frequencyToNoteName(frequency) else null
+                    val rawFrequency = pitchDetector.detectPitch(orderedBuffer)
 
-                    emit(DetectedPitch.Success(frequency, noteName))
+                    // 中央値フィルタ: 直近 MEDIAN_WINDOW フレームを保持
+                    freqHistory.addLast(rawFrequency)
+                    if (freqHistory.size > MEDIAN_WINDOW) freqHistory.removeFirst()
+
+                    // 有効検出が MIN_STABLE_COUNT 以上あれば中央値を使用、なければ未検出
+                    val positives = freqHistory.filter { it > 0f }.sorted()
+                    val smoothedFrequency = if (positives.size >= MIN_STABLE_COUNT) {
+                        positives[positives.size / 2]
+                    } else {
+                        -1f
+                    }
+
+                    val noteName = if (smoothedFrequency > 0f) {
+                        NoteMapper.frequencyToNoteName(smoothedFrequency)
+                    } else {
+                        null
+                    }
+
+                    emit(DetectedPitch.Success(smoothedFrequency, noteName))
                 }
             }
         } finally {
